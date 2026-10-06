@@ -1,0 +1,366 @@
+﻿@page "/"
+@implements IDisposable
+<PageTitle>Campo Minado</PageTitle>
+
+<div class="estrutura-jogo">
+    <header class="cabecalho-jogo">
+        <h1>Campo Minado</h1>
+        <p>O clássico jogo do Windows</p>
+    </header>
+
+    <section class="painel-jogo" aria-label="Campo Minado">
+        <div class="linha-dificuldade">
+            <label for="dificuldade">Dificuldade:</label>
+            <select id="dificuldade" @bind="dificuldadeSelecionada" @bind:after="IniciarNovoJogo">
+                @foreach (var dificuldade in Dificuldades)
+                {
+                    <option value="@dificuldade.Chave">@dificuldade.Nome</option>
+                }
+            </select>
+        </div>
+
+        <div class="painel-status">
+            <div class="visor" aria-label="@($"{MinasRestantes} minas restantes")">@MinasRestantes.ToString("000")</div>
+            <button class="botao-rosto" @onclick="IniciarNovoJogo" aria-label="Reiniciar jogo">@Rosto</button>
+            <div class="visor" aria-label="@($"{SegundosDecorridos} segundos")">@SegundosDecorridos.ToString("000")</div>
+        </div>
+
+        <div class="moldura-tabuleiro">
+            <div class="tabuleiro"
+                 style="@($"--colunas: {Colunas}; --tamanho-celula: {TamanhoCelula}px")"
+                 @oncontextmenu="ImpedirMenuContexto"
+                 @oncontextmenu:preventDefault="true">
+                @for (var linha = 0; linha < Linhas; linha++)
+                {
+                    for (var coluna = 0; coluna < Colunas; coluna++)
+                    {
+                        var linhaCelula = linha;
+                        var colunaCelula = coluna;
+                        var celula = Tabuleiro[linhaCelula, colunaCelula];
+                        <button class="@ObterClasseCelula(celula)"
+                                @onclick="() => Revelar(linhaCelula, colunaCelula)"
+                                @oncontextmenu="() => AlternarBandeira(linhaCelula, colunaCelula)"
+                                aria-label="@ObterRotuloCelula(celula, linhaCelula, colunaCelula)">
+                            @ObterTextoCelula(celula)
+                        </button>
+                    }
+                }
+            </div>
+        </div>
+
+        <div class="texto-ajuda">Clique esquerdo para abrir · clique direito para marcar</div>
+    </section>
+</div>
+
+@code {
+    private enum EstadoJogo { Pronto, Jogando, Venceu, Perdeu }
+
+    private sealed record Dificuldade(string Chave, string Nome, int Linhas, int Colunas, int Minas);
+
+    private sealed class Celula
+    {
+        public bool EhMina { get; set; }
+        public bool EstaRevelada { get; set; }
+        public bool EstaBandeirada { get; set; }
+        public bool EstaExplodida { get; set; }
+        public int MinasAdjacentes { get; set; }
+    }
+
+    private static readonly Dificuldade[] Dificuldades =
+    [
+        new("facil", "Fácil (9 x 9)", 9, 9, 10),
+        new("medio", "Médio (16 x 16)", 16, 16, 40),
+        new("dificil", "Difícil (30 x 16)", 16, 30, 99)
+    ];
+
+    private readonly Random aleatorio = Random.Shared;
+    private System.Threading.Timer? temporizador;
+    private Celula[,] Tabuleiro = new Celula[0, 0];
+    private string dificuldadeSelecionada = "facil";
+    private EstadoJogo estado;
+    private int segundosDecorridos;
+    private int quantidadeBandeiras;
+
+    private Dificuldade DificuldadeAtual => Dificuldades.First(dificuldade => dificuldade.Chave == dificuldadeSelecionada);
+    private int Linhas => DificuldadeAtual.Linhas;
+    private int Colunas => DificuldadeAtual.Colunas;
+    private int TamanhoCelula => Colunas >= 30 ? 22 : 26;
+    private int MinasRestantes => DificuldadeAtual.Minas - quantidadeBandeiras;
+    private string Rosto => estado switch
+    {
+        EstadoJogo.Venceu => "😎",
+        EstadoJogo.Perdeu => "😵",
+        _ => "🙂"
+    };
+
+    private int SegundosDecorridos => segundosDecorridos;
+
+    protected override void OnInitialized()
+    {
+        IniciarNovoJogo();
+    }
+
+    private void IniciarNovoJogo()
+    {
+        temporizador?.Dispose();
+        temporizador = null;
+        segundosDecorridos = 0;
+        quantidadeBandeiras = 0;
+        estado = EstadoJogo.Pronto;
+        Tabuleiro = new Celula[Linhas, Colunas];
+
+        for (var linha = 0; linha < Linhas; linha++)
+        {
+            for (var coluna = 0; coluna < Colunas; coluna++)
+            {
+                Tabuleiro[linha, coluna] = new Celula();
+            }
+        }
+    }
+
+    private void Revelar(int linha, int coluna)
+    {
+        if (estado is EstadoJogo.Venceu or EstadoJogo.Perdeu || Tabuleiro[linha, coluna].EstaBandeirada)
+        {
+            return;
+        }
+
+        if (estado == EstadoJogo.Pronto)
+        {
+            GerarMinas(linha, coluna);
+            estado = EstadoJogo.Jogando;
+            IniciarTemporizador();
+        }
+
+        var celula = Tabuleiro[linha, coluna];
+        if (celula.EstaRevelada)
+        {
+            RevelarVizinhas(linha, coluna);
+            return;
+        }
+
+        if (celula.EhMina)
+        {
+            celula.EstaExplodida = true;
+            PerderJogo();
+            return;
+        }
+
+        RevelarEmCascata(linha, coluna);
+        VerificarVitoria();
+    }
+
+    private void AlternarBandeira(int linha, int coluna)
+    {
+        if (estado is EstadoJogo.Venceu or EstadoJogo.Perdeu || Tabuleiro[linha, coluna].EstaRevelada)
+        {
+            return;
+        }
+
+        var celula = Tabuleiro[linha, coluna];
+        if (!celula.EstaBandeirada && quantidadeBandeiras >= DificuldadeAtual.Minas)
+        {
+            return;
+        }
+
+        celula.EstaBandeirada = !celula.EstaBandeirada;
+        quantidadeBandeiras += celula.EstaBandeirada ? 1 : -1;
+    }
+
+    private void GerarMinas(int linhaSegura, int colunaSegura)
+    {
+        var celulasProtegidas = new HashSet<(int Linha, int Coluna)>();
+        for (var linha = linhaSegura - 1; linha <= linhaSegura + 1; linha++)
+        {
+            for (var coluna = colunaSegura - 1; coluna <= colunaSegura + 1; coluna++)
+            {
+                if (EstaDentro(linha, coluna))
+                {
+                    celulasProtegidas.Add((linha, coluna));
+                }
+            }
+        }
+
+        var disponiveis = new List<(int Linha, int Coluna)>();
+        for (var linha = 0; linha < Linhas; linha++)
+        {
+            for (var coluna = 0; coluna < Colunas; coluna++)
+            {
+                if (!celulasProtegidas.Contains((linha, coluna)))
+                {
+                    disponiveis.Add((linha, coluna));
+                }
+            }
+        }
+
+        for (var indice = disponiveis.Count - 1; indice > 0; indice--)
+        {
+            var indiceTroca = aleatorio.Next(indice + 1);
+            (disponiveis[indice], disponiveis[indiceTroca]) = (disponiveis[indiceTroca], disponiveis[indice]);
+        }
+
+        foreach (var (linha, coluna) in disponiveis.Take(DificuldadeAtual.Minas))
+        {
+            Tabuleiro[linha, coluna].EhMina = true;
+        }
+
+        for (var linha = 0; linha < Linhas; linha++)
+        {
+            for (var coluna = 0; coluna < Colunas; coluna++)
+            {
+                Tabuleiro[linha, coluna].MinasAdjacentes = ContarMinasVizinhas(linha, coluna);
+            }
+        }
+    }
+
+    private void RevelarEmCascata(int linhaInicial, int colunaInicial)
+    {
+        var fila = new Queue<(int Linha, int Coluna)>();
+        fila.Enqueue((linhaInicial, colunaInicial));
+
+        while (fila.Count > 0)
+        {
+            var (linha, coluna) = fila.Dequeue();
+            var celula = Tabuleiro[linha, coluna];
+            if (celula.EstaRevelada || celula.EstaBandeirada || celula.EhMina)
+            {
+                continue;
+            }
+
+            celula.EstaRevelada = true;
+            if (celula.MinasAdjacentes != 0)
+            {
+                continue;
+            }
+
+            foreach (var vizinha in Vizinhas(linha, coluna))
+            {
+                if (!Tabuleiro[vizinha.Linha, vizinha.Coluna].EstaRevelada)
+                {
+                    fila.Enqueue(vizinha);
+                }
+            }
+        }
+    }
+
+    private void RevelarVizinhas(int linha, int coluna)
+    {
+        var celula = Tabuleiro[linha, coluna];
+        if (celula.MinasAdjacentes == 0 || Vizinhas(linha, coluna).Count(v => Tabuleiro[v.Linha, v.Coluna].EstaBandeirada) != celula.MinasAdjacentes)
+        {
+            return;
+        }
+
+        foreach (var vizinha in Vizinhas(linha, coluna))
+        {
+            if (!Tabuleiro[vizinha.Linha, vizinha.Coluna].EstaRevelada && !Tabuleiro[vizinha.Linha, vizinha.Coluna].EstaBandeirada)
+            {
+                Revelar(vizinha.Linha, vizinha.Coluna);
+                if (estado == EstadoJogo.Perdeu)
+                {
+                    return;
+                }
+            }
+        }
+    }
+
+    private void PerderJogo()
+    {
+        estado = EstadoJogo.Perdeu;
+        temporizador?.Dispose();
+        temporizador = null;
+
+        foreach (var celula in Tabuleiro)
+        {
+            if (celula.EhMina)
+            {
+                celula.EstaRevelada = true;
+            }
+        }
+    }
+
+    private void VerificarVitoria()
+    {
+        if (Tabuleiro.Cast<Celula>().Where(celula => !celula.EhMina).All(celula => celula.EstaRevelada))
+        {
+            estado = EstadoJogo.Venceu;
+            temporizador?.Dispose();
+            temporizador = null;
+            foreach (var celula in Tabuleiro)
+            {
+                if (celula.EhMina)
+                {
+                    celula.EstaBandeirada = true;
+                }
+            }
+            quantidadeBandeiras = DificuldadeAtual.Minas;
+        }
+    }
+
+    private void IniciarTemporizador()
+    {
+        temporizador = new System.Threading.Timer(_ =>
+        {
+            if (estado != EstadoJogo.Jogando)
+            {
+                return;
+            }
+
+            segundosDecorridos = Math.Min(999, segundosDecorridos + 1);
+            InvokeAsync(StateHasChanged);
+        }, null, 1000, 1000);
+    }
+
+    private int ContarMinasVizinhas(int linha, int coluna) =>
+        Vizinhas(linha, coluna).Count(vizinha => Tabuleiro[vizinha.Linha, vizinha.Coluna].EhMina);
+
+    private IEnumerable<(int Linha, int Coluna)> Vizinhas(int linha, int coluna)
+    {
+        for (var deslocamentoLinha = -1; deslocamentoLinha <= 1; deslocamentoLinha++)
+        {
+            for (var deslocamentoColuna = -1; deslocamentoColuna <= 1; deslocamentoColuna++)
+            {
+                if (deslocamentoLinha == 0 && deslocamentoColuna == 0)
+                {
+                    continue;
+                }
+
+                var linhaVizinha = linha + deslocamentoLinha;
+                var colunaVizinha = coluna + deslocamentoColuna;
+                if (EstaDentro(linhaVizinha, colunaVizinha))
+                {
+                    yield return (linhaVizinha, colunaVizinha);
+                }
+            }
+        }
+    }
+
+    private bool EstaDentro(int linha, int coluna) => linha >= 0 && linha < Linhas && coluna >= 0 && coluna < Colunas;
+
+    private string ObterTextoCelula(Celula celula) =>
+        celula.EstaBandeirada && !celula.EstaRevelada ? "⚑" :
+        celula.EstaRevelada && celula.EhMina ? "✹" :
+        celula.EstaRevelada && celula.MinasAdjacentes > 0 ? celula.MinasAdjacentes.ToString() : string.Empty;
+
+    private string ObterClasseCelula(Celula celula)
+    {
+        if (!celula.EstaRevelada)
+        {
+            return celula.EstaBandeirada ? "celula bandeirada" : "celula";
+        }
+
+        return $"celula revelada {(celula.EhMina ? "mina" : $"numero-{celula.MinasAdjacentes}")}{(celula.EstaExplodida ? " explodida" : "")}";
+    }
+
+    private string ObterRotuloCelula(Celula celula, int linha, int coluna) =>
+        celula.EstaBandeirada ? $"Bandeira na linha {linha + 1}, coluna {coluna + 1}" :
+        celula.EstaRevelada ? (celula.EhMina ? "Mina" : $"Célula aberta com {celula.MinasAdjacentes} minas vizinhas") :
+        $"Célula fechada na linha {linha + 1}, coluna {coluna + 1}";
+
+    private void ImpedirMenuContexto(MouseEventArgs _) { }
+
+    public void Dispose()
+    {
+        temporizador?.Dispose();
+    }
+}

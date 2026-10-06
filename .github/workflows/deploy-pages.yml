@@ -1,0 +1,54 @@
+name: Publicar no GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar código
+        uses: actions/checkout@v4
+
+      - name: Configurar .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Publicar aplicação
+        working-directory: src
+        run: dotnet publish CampoMinado.csproj -c Release -o ../release
+
+      - name: Ajustar caminho do GitHub Pages
+        run: sed -i 's#<base href="/" />#<base href="/campo-minado-blazor/" />#' release/wwwroot/index.html
+
+      - name: Criar fallback para rotas
+        run: cp release/wwwroot/index.html release/wwwroot/404.html
+
+      - name: Configurar GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Preparar artefato
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: release/wwwroot
+
+      - name: Publicar
+        id: deployment
+        uses: actions/deploy-pages@v4
